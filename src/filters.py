@@ -2,6 +2,7 @@ import os
 import fnmatch
 
 class ExtensionFilter:
+    """Фильтр по расширению (без точки, например 'py', 'txt')."""
     def __init__(self, extensions):
         self.extensions = set(ext.lower() for ext in extensions)
 
@@ -10,6 +11,7 @@ class ExtensionFilter:
         return ext.lower().lstrip('.') in self.extensions
 
 class PatternFilter:
+    """Фильтр по шаблону имени файла (fnmatch-шаблон, например '*.py')."""
     def __init__(self, pattern):
         self.pattern = pattern
 

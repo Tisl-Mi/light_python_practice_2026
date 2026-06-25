@@ -1,26 +1,48 @@
 import sqlite3
 import os
+import json
 
 DB_PATH = "data/app.db"
 
 def init_db(db_path=DB_PATH):
-    """Создаёт папку data и файл базы, если их нет. Добавляет таблицу scan_sessions."""
+    """Создаёт папку data, файл базы и все таблицы, если их нет."""
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
-    cur.execute("""
+    cur.executescript("""
         CREATE TABLE IF NOT EXISTS scan_sessions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             root_path TEXT NOT NULL,
             scan_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
+        );
+        CREATE TABLE IF NOT EXISTS files (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL,
+            relative_path TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            extension TEXT,
+            size_bytes INTEGER,
+            modified_time REAL,
+            content_hash TEXT,
+            FOREIGN KEY (session_id) REFERENCES scan_sessions(id)
+        );
+        CREATE TABLE IF NOT EXISTS backup_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_path TEXT NOT NULL,
+            backup_path TEXT NOT NULL,
+            report_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            missing_count INTEGER DEFAULT 0,
+            changed_count INTEGER DEFAULT 0,
+            extra_count INTEGER DEFAULT 0,
+            details TEXT
+        );
     """)
     conn.commit()
     conn.close()
     print(f"База данных готова: {db_path}")
 
-def insert_test_session(root_path):
-    """Вставляет тестовую запись и возвращает её id."""
+def create_session(root_path):
+    """Создаёт новую сессию сканирования и возвращает её id."""
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("INSERT INTO scan_sessions (root_path) VALUES (?)", (root_path,))
@@ -29,11 +51,76 @@ def insert_test_session(root_path):
     conn.close()
     return session_id
 
-def get_all_sessions():
-    """Выводит все сессии из базы."""
+def save_files(session_id, files):
+    """
+    Сохраняет список файлов в таблицу files.
+    files — список словарей с ключами: rel_path, filename, extension, size_bytes, modified.
+    """
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute("SELECT id, root_path, scan_date FROM scan_sessions")
+    for f in files:
+        cur.execute("""
+            INSERT INTO files (session_id, relative_path, filename, extension, size_bytes, modified_time)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (session_id, f['rel_path'], f['filename'], f['extension'], f['size_bytes'], f['modified']))
+    conn.commit()
+    conn.close()
+
+def get_files_by_session(session_id):
+    """Возвращает список файлов для указанной сессии."""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, relative_path, filename, extension, size_bytes, modified_time, content_hash
+        FROM files WHERE session_id=?
+    """, (session_id,))
     rows = cur.fetchall()
     conn.close()
     return rows
+
+def update_hash(file_id, hash_value):
+    """Обновляет хеш для конкретного файла (по id)."""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("UPDATE files SET content_hash=? WHERE id=?", (hash_value, file_id))
+    conn.commit()
+    conn.close()
+
+def find_duplicates(session_id):
+    """
+    Ищет дубликаты по хешу в рамках сессии.
+    Возвращает список кортежей (hash, [список относительных путей]).
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    # Выбираем хеши, встречающиеся более одного раза
+    cur.execute("""
+        SELECT content_hash, GROUP_CONCAT(relative_path, '|')
+        FROM files
+        WHERE session_id=? AND content_hash IS NOT NULL
+        GROUP BY content_hash
+        HAVING COUNT(*) > 1
+    """, (session_id,))
+    rows = cur.fetchall()
+    conn.close()
+    result = []
+    for hash_val, paths_concat in rows:
+        paths = paths_concat.split('|')
+        result.append((hash_val, paths))
+    return result
+
+def save_backup_report(source_path, backup_path, missing, changed, extra):
+    """Сохраняет отчёт о сравнении с бэкапом."""
+    details = json.dumps({
+        "missing": missing,
+        "changed": changed,
+        "extra": extra
+    }, ensure_ascii=False, indent=2)
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO backup_reports (source_path, backup_path, missing_count, changed_count, extra_count, details)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (source_path, backup_path, len(missing), len(changed), len(extra), details))
+    conn.commit()
+    conn.close()
